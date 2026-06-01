@@ -183,13 +183,10 @@ async function polishViaSDK(
   original: string,
   context: string,
   config: PolishConfig,
-): Promise<{ text: string; success: boolean }> {
+): Promise<{ text: string; success: boolean; error?: string }> {
   const modelRef = parseModel(config.model)
   if (!modelRef) {
-    console.error(
-      `[polish] invalid model format "${config.model}", expected "provider/model-id"`,
-    )
-    return { text: original, success: false }
+    return { text: original, success: false, error: `Invalid model format "${config.model}", expected "provider/model-id"` }
   }
 
   const userMsg = context
@@ -214,12 +211,11 @@ async function polishViaSDK(
           : createResp
     const childId = childSession?.id
     if (!childId || typeof childId !== "string") {
-      console.error("[polish] failed to create child session")
-      return { text: original, success: false }
+      return { text: original, success: false, error: "Failed to create child session" }
     }
 
     // 2. Send prompt to child session with polish agent (no tools)
-    await client.session.prompt({
+    const promptResp = await client.session.prompt({
       path: { id: childId },
       ...(sessionDirectory ? { query: { directory: sessionDirectory } } : {}),
       body: {
@@ -231,24 +227,47 @@ async function polishViaSDK(
       },
     })
 
-    // 3. Read child session messages to extract assistant response
+    // 3. Check prompt response for model errors
+    if (promptResp?.data?.info?.error) {
+      const apiError = promptResp.data.info.error
+      const msg = apiError.message || apiError.name || "Unknown model error"
+      return { text: original, success: false, error: `Model error: ${msg}` }
+    }
+
+    // 4. Try extracting text from prompt response directly
+    if (promptResp?.data) {
+      const text = extractLatestAssistantText([{ info: promptResp.data.info, parts: promptResp.data.parts }])
+      if (text) {
+        return { text, success: true }
+      }
+    }
+
+    // 5. Fallback: read messages from child session
     const messagesResponse = await client.session.messages({
       path: { id: childId },
       ...(sessionDirectory ? { query: { directory: sessionDirectory, limit: 50 } } : { query: { limit: 50 } }),
     })
 
-    // Normalize: SDK may return { data: [...] } or [...]
     const messages = normalizeResponse(messagesResponse)
+
+    // Check for errors in assistant messages
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.info?.role === "assistant" && messages[i]?.info?.error) {
+        const apiError = messages[i].info.error
+        const msg = apiError.message || apiError.name || "Unknown model error"
+        return { text: original, success: false, error: `Model error: ${msg}` }
+      }
+    }
+
     const result = extractLatestAssistantText(messages)
     if (!result) {
-      console.error("[polish] child session returned no assistant output")
-      return { text: original, success: false }
+      return { text: original, success: false, error: "No output from model" }
     }
 
     return { text: result, success: true }
-  } catch (err) {
-    console.error("[polish] SDK call failed:", err)
-    return { text: original, success: false }
+  } catch (err: any) {
+    const msg = err?.message || String(err)
+    return { text: original, success: false, error: `SDK error: ${msg}` }
   }
 }
 
@@ -346,10 +365,9 @@ const server: Plugin = async (ctx) => {
             await ctx.client.tui.showToast({
               body: {
                 title: "Polish Failed",
-                message:
-                  "Could not optimize prompt, loaded original instead.",
-                variant: "warning",
-                duration: 3000,
+                message: result.error || "Could not optimize prompt, loaded original instead.",
+                variant: "error",
+                duration: 5000,
               },
             })
           }
