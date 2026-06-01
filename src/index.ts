@@ -194,7 +194,7 @@ async function polishViaSDK(
     : `Optimize this prompt:\n\n${original}`
 
   try {
-    // 1. Create child session (same pattern as magic-context historian)
+    // 1. Create child session
     const createResp = await client.session.create({
       body: {
         parentID: parentSessionId,
@@ -214,57 +214,64 @@ async function polishViaSDK(
       return { text: original, success: false, error: "Failed to create child session" }
     }
 
-    // 2. Send prompt to child session with polish agent (no tools)
-    const promptResp = await client.session.prompt({
-      path: { id: childId },
-      ...(sessionDirectory ? { query: { directory: sessionDirectory } } : {}),
-      body: {
-        agent: POLISH_AGENT,
-        model: modelRef,
-        parts: [
-          { type: "text", text: userMsg, synthetic: true },
-        ],
-      },
-    })
+    // Cleanup child session on all exit paths
+    const cleanup = () => client.session.delete({ path: { id: childId } }).catch(() => {})
 
-    // 3. Check prompt response for model errors
-    if (promptResp?.data?.info?.error) {
-      const apiError = promptResp.data.info.error
-      const msg = apiError.message || apiError.name || "Unknown model error"
-      return { text: original, success: false, error: `Model error: ${msg}` }
-    }
+    try {
+      // 2. Send prompt to child session with polish agent (no tools)
+      const promptResp = await client.session.prompt({
+        path: { id: childId },
+        ...(sessionDirectory ? { query: { directory: sessionDirectory } } : {}),
+        body: {
+          agent: POLISH_AGENT,
+          model: modelRef,
+          parts: [
+            { type: "text", text: userMsg, synthetic: true },
+          ],
+        },
+      })
 
-    // 4. Try extracting text from prompt response directly
-    if (promptResp?.data) {
-      const text = extractLatestAssistantText([{ info: promptResp.data.info, parts: promptResp.data.parts }])
-      if (text) {
-        return { text, success: true }
-      }
-    }
-
-    // 5. Fallback: read messages from child session
-    const messagesResponse = await client.session.messages({
-      path: { id: childId },
-      ...(sessionDirectory ? { query: { directory: sessionDirectory, limit: 50 } } : { query: { limit: 50 } }),
-    })
-
-    const messages = normalizeResponse(messagesResponse)
-
-    // Check for errors in assistant messages
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]?.info?.role === "assistant" && messages[i]?.info?.error) {
-        const apiError = messages[i].info.error
+      // 3. Check prompt response for model errors
+      if (promptResp?.data?.info?.error) {
+        const apiError = promptResp.data.info.error
         const msg = apiError.message || apiError.name || "Unknown model error"
         return { text: original, success: false, error: `Model error: ${msg}` }
       }
-    }
 
-    const result = extractLatestAssistantText(messages)
-    if (!result) {
-      return { text: original, success: false, error: "No output from model" }
-    }
+      // 4. Try extracting text from prompt response directly
+      if (promptResp?.data) {
+        const text = extractLatestAssistantText([{ info: promptResp.data.info, parts: promptResp.data.parts }])
+        if (text) {
+          return { text, success: true }
+        }
+      }
 
-    return { text: result, success: true }
+      // 5. Fallback: read messages from child session
+      const messagesResponse = await client.session.messages({
+        path: { id: childId },
+        ...(sessionDirectory ? { query: { directory: sessionDirectory, limit: 50 } } : { query: { limit: 50 } }),
+      })
+
+      const messages = normalizeResponse(messagesResponse)
+
+      // Check for errors in assistant messages
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]?.info?.role === "assistant" && messages[i]?.info?.error) {
+          const apiError = messages[i].info.error
+          const msg = apiError.message || apiError.name || "Unknown model error"
+          return { text: original, success: false, error: `Model error: ${msg}` }
+        }
+      }
+
+      const result = extractLatestAssistantText(messages)
+      if (!result) {
+        return { text: original, success: false, error: "No output from model" }
+      }
+
+      return { text: result, success: true }
+    } finally {
+      await cleanup()
+    }
   } catch (err: any) {
     const msg = err?.message || String(err)
     return { text: original, success: false, error: `SDK error: ${msg}` }
@@ -274,9 +281,6 @@ async function polishViaSDK(
 // --- Plugin ---
 
 const server: Plugin = async (ctx) => {
-  // Load config once at startup
-  const config = loadConfig()
-
   return {
     config: async (cfg) => {
       cfg.command ??= {}
@@ -309,6 +313,8 @@ const server: Plugin = async (ctx) => {
     "command.execute.before": async (input, output) => {
       // Shared polish logic
       const runPolish = async (original: string, autoSend: boolean) => {
+        // Reload config on every invocation for hot-reload
+        const config = loadConfig()
         try {
           // Show loading state
           await ctx.client.tui.clearPrompt({})
@@ -322,8 +328,8 @@ const server: Plugin = async (ctx) => {
             const resp = await ctx.client.session.messages({
               path: { id: input.sessionID },
             })
-            const msgs = resp.data ?? resp
-            if (Array.isArray(msgs)) {
+            const msgs = normalizeResponse(resp)
+            if (Array.isArray(msgs) && msgs.length > 0) {
               context = extractContext(
                 msgs,
                 config.context.maxMessages,
