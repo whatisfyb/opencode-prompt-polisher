@@ -17,8 +17,7 @@ An [OpenCode](https://opencode.ai) plugin that AI-optimizes your prompts using c
 ## Features
 
 - **Context-aware** — injects recent conversation context (file names, error messages, tech stack) into the optimization
-- **Undo support** — `/polish-undo` restores the original prompt
-- **Auto-send** — `/polish -d` fills and auto-submits the optimized prompt
+- **Auto-send** — `/polish-send` fills and auto-submits the optimized prompt
 - **Safe subagent** — runs as a restricted hidden agent with no tool access, guaranteed never to execute your request instead of optimizing it
 - **Configurable** — model, context window, and intensity via `polish.jsonc`
 
@@ -77,7 +76,7 @@ You:  (edit if needed) → Enter
 ```
 
 ```
-You:  /polish-d 写一个二分查找
+You:  /polish-send 写一个二分查找
 
 # ⏳ (toast: loading)
 # Result is auto-sent without further action
@@ -114,7 +113,7 @@ If no config file is found, defaults are used (model: `opencode/deepseek-v4-flas
 1. **Interception** — the plugin hooks `command.execute.before` and intercepts `/polish` commands
 2. **Context gathering** — reads recent messages from the current session (max 6 messages, 500 chars each)
 3. **Optimization** — sends a system prompt + context + original prompt to the LLM through a dedicated hidden subagent with zero tool access
-4. **Result delivery** — the optimized prompt replaces the input box content (with undo support via `/polish-undo`)
+4. **Result delivery** — the optimized prompt replaces the input box content
 
 The hidden `polish` agent is registered with `tools: {}` and all permissions set to `"deny"`, ensuring it can only generate text — never execute code or use tools.
 
@@ -134,8 +133,7 @@ command.execute.before hook
               ├─ create child session (hidden polish agent)
               ├─ session.prompt({ agent: "polish", ... })
               ├─ read assistant response
-              ├─ save original to undo stack
-              └─ appendPrompt(result)
+               └─ appendPrompt(result)
 ```
 
 ## Development
