@@ -266,8 +266,12 @@ const server: Plugin = async (ctx) => {
     config: async (cfg) => {
       cfg.command ??= {}
       cfg.command["polish"] = {
-        template: "[-d] <prompt>",
-        description: "AI-optimize your prompt using conversation context. Add -d to auto-send.",
+        template: "<prompt>",
+        description: "AI-optimize your prompt using conversation context. Result fills the input box without auto-sending.",
+      }
+      cfg.command["polish-d"] = {
+        template: "<prompt>",
+        description: "AI-optimize your prompt using conversation context. Result fills and auto-submits.",
       }
       cfg.command["polish-undo"] = {
         template: "",
@@ -292,106 +296,107 @@ const server: Plugin = async (ctx) => {
     },
 
     "command.execute.before": async (input, output) => {
+      // Shared polish logic
+      const runPolish = async (original: string, autoSend: boolean) => {
+        try {
+          // Show loading state
+          await ctx.client.tui.clearPrompt({})
+          await ctx.client.tui.appendPrompt({
+            body: { text: "⏳ 正在优化提示词..." },
+          })
+
+          // Fetch conversation context
+          let context = ""
+          try {
+            const resp = await ctx.client.session.messages({
+              path: { id: input.sessionID },
+            })
+            const msgs = resp.data ?? resp
+            if (Array.isArray(msgs)) {
+              context = extractContext(
+                msgs,
+                config.context.maxMessages,
+                config.context.maxCharsPerMessage,
+              )
+            }
+          } catch {
+            // no context — polish without it
+          }
+
+          // Polish via OpenCode SDK
+          const result = await polishViaSDK(
+            ctx.client,
+            input.sessionID,
+            undefined,
+            original,
+            context,
+            config,
+          )
+
+          // Save original for undo
+          undoStack.set(input.sessionID, original)
+
+          // Put result in input box
+          const finalText = result.success ? result.text : original
+
+          await ctx.client.tui.clearPrompt({})
+          await ctx.client.tui.appendPrompt({ body: { text: finalText } })
+
+          if (autoSend) {
+            await ctx.client.tui.submitPrompt({})
+          } else if (result.success) {
+            await ctx.client.tui.showToast({
+              body: {
+                title: "Polish Ready",
+                message: "Optimized prompt loaded. Press Enter to send, or edit first.",
+                variant: "info",
+                duration: 3000,
+              },
+            })
+          } else {
+            await ctx.client.tui.showToast({
+              body: {
+                title: "Polish Failed",
+                message:
+                  "Could not optimize prompt, loaded original instead.",
+                variant: "warning",
+                duration: 3000,
+              },
+            })
+          }
+        } catch (err) {
+          // Fallback: load original into input box
+          try {
+            await ctx.client.tui.clearPrompt({})
+            await ctx.client.tui.appendPrompt({ body: { text: original } })
+            if (autoSend) await ctx.client.tui.submitPrompt({})
+          } catch {
+            // Last resort
+          }
+        }
+      }
+
       // --- /polish ---
       if (input.command === "polish") {
-        const raw = (input.arguments || "").trim()
-        if (!raw) {
-          throw new Error(
-            "Usage: /polish [-d] <your prompt>\n\n  -d  Auto-send after optimization\n\nExample: /polish 帮我写个函数\n         /polish -d 帮我写个函数",
-          )
-        }
-
-        // Parse -d flag
-        const autoSend = raw.startsWith("-d ")
-        const original = autoSend ? raw.slice(3).trim() : raw
-
+        const original = (input.arguments || "").trim()
         if (!original) {
           throw new Error(
-            "Usage: /polish [-d] <your prompt>\n\n  -d  Auto-send after optimization",
+            "Usage: /polish <prompt>\n\nExample: /polish 帮我写个函数",
           )
         }
+        runPolish(original, false)
+        throw new Error("__POLISH_HANDLED__")
+      }
 
-        // Fire-and-forget: async polish + TUI update
-        ;(async () => {
-          try {
-            // Show loading state
-            await ctx.client.tui.clearPrompt({})
-            await ctx.client.tui.appendPrompt({
-              body: { text: "⏳ 正在优化提示词..." },
-            })
-
-            // Fetch conversation context
-            let context = ""
-            try {
-              const resp = await ctx.client.session.messages({
-                path: { id: input.sessionID },
-              })
-              const msgs = resp.data ?? resp
-              if (Array.isArray(msgs)) {
-                context = extractContext(
-                  msgs,
-                  config.context.maxMessages,
-                  config.context.maxCharsPerMessage,
-                )
-              }
-            } catch {
-              // no context — polish without it
-            }
-
-            // Polish via OpenCode SDK
-            const result = await polishViaSDK(
-              ctx.client,
-              input.sessionID,
-              undefined,
-              original,
-              context,
-              config,
-            )
-
-            // Save original for undo
-            undoStack.set(input.sessionID, original)
-
-            // Put result in input box
-            const finalText = result.success ? result.text : original
-
-            await ctx.client.tui.clearPrompt({})
-            await ctx.client.tui.appendPrompt({ body: { text: finalText } })
-
-            if (autoSend) {
-              await ctx.client.tui.submitPrompt({})
-            } else if (result.success) {
-              await ctx.client.tui.showToast({
-                body: {
-                  title: "Polish Ready",
-                  message: "Optimized prompt loaded. Press Enter to send, or edit first.",
-                  variant: "info",
-                  duration: 3000,
-                },
-              })
-            } else {
-              await ctx.client.tui.showToast({
-                body: {
-                  title: "Polish Failed",
-                  message:
-                    "Could not optimize prompt, loaded original instead.",
-                  variant: "warning",
-                  duration: 3000,
-                },
-              })
-            }
-          } catch (err) {
-            // Fallback: load original into input box
-            try {
-              await ctx.client.tui.clearPrompt({})
-              await ctx.client.tui.appendPrompt({ body: { text: original } })
-              if (autoSend) await ctx.client.tui.submitPrompt({})
-            } catch {
-              // Last resort
-            }
-          }
-        })()
-
-        // Block default command execution
+      // --- /polish-d ---
+      if (input.command === "polish-d") {
+        const original = (input.arguments || "").trim()
+        if (!original) {
+          throw new Error(
+            "Usage: /polish-d <prompt>\n\nExample: /polish-d 帮我写个函数",
+          )
+        }
+        runPolish(original, true)
         throw new Error("__POLISH_HANDLED__")
       }
 
