@@ -63,8 +63,7 @@ Restart OpenCode. Type `/polish` to verify it's registered.
 | Command | Description |
 |---|---|
 | `/polish <prompt>` | Optimize the prompt and put the result in the input box (waiting for you to edit or send) |
-| `/polish-d <prompt>` | Optimize and auto-send immediately |
-| `/polish-undo` | Restore the last prompt before `/polish` |
+| `/polish-send <prompt>` | Optimize and auto-send immediately |
 
 ### Examples
 

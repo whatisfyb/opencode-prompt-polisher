@@ -67,10 +67,6 @@ function parseModel(model: string): ModelRef | null {
   }
 }
 
-// --- Undo stack ---
-
-const undoStack: Map<string, string> = new Map()
-
 // --- System prompt ---
 
 const POLISH_AGENT = "polish"
@@ -269,13 +265,9 @@ const server: Plugin = async (ctx) => {
         template: "<prompt>",
         description: "AI-optimize your prompt using conversation context. Result fills the input box without auto-sending.",
       }
-      cfg.command["polish-d"] = {
+      cfg.command["polish-send"] = {
         template: "<prompt>",
         description: "AI-optimize your prompt using conversation context. Result fills and auto-submits.",
-      }
-      cfg.command["polish-undo"] = {
-        template: "",
-        description: "Restore the last prompt before /polish",
       }
       // Register polish agent: hidden subagent with no tools, max 1 step
       cfg.agent ??= {}
@@ -333,9 +325,6 @@ const server: Plugin = async (ctx) => {
             config,
           )
 
-          // Save original for undo
-          undoStack.set(input.sessionID, original)
-
           // Put result in input box
           const finalText = result.success ? result.text : original
 
@@ -388,31 +377,16 @@ const server: Plugin = async (ctx) => {
         throw new Error("__POLISH_HANDLED__")
       }
 
-      // --- /polish-d ---
-      if (input.command === "polish-d") {
+      // --- /polish-send ---
+      if (input.command === "polish-send") {
         const original = (input.arguments || "").trim()
         if (!original) {
           throw new Error(
-            "Usage: /polish-d <prompt>\n\nExample: /polish-d 帮我写个函数",
+            "Usage: /polish-send <prompt>\n\nExample: /polish-send 帮我写个函数",
           )
         }
         runPolish(original, true)
         throw new Error("__POLISH_HANDLED__")
-      }
-
-      // --- /polish-undo ---
-      if (input.command === "polish-undo") {
-        const saved = undoStack.get(input.sessionID)
-        if (!saved) {
-          throw new Error(
-            "Nothing to undo — no previous /polish in this session.",
-          )
-        }
-        undoStack.delete(input.sessionID)
-        output.parts.length = 0
-        // Part type requires id/sessionID/messageID but they're filled by OpenCode runtime
-        output.parts.push({ type: "text", text: saved } as any)
-        return
       }
     },
   }
