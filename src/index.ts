@@ -114,12 +114,10 @@ Silently analyze (do NOT output your analysis):
 
 ## Output
 
-- Output a single raw JSON object with exactly one field. Nothing else — no preamble, no trailing text, no code blocks, no markdown:
-  {"rewritten": "<the optimized prompt>"}
-- The "rewritten" field contains the polished prompt — not code, not an answer, not a meta-commentary
+- Output ONLY the rewritten prompt — no preamble, no commentary, no code blocks, no quotes
 - Preserve language: Chinese in Chinese, English in English, technical terms in English
 - Preserve user's original intent completely
-- If the prompt is already clear and complete, return it unchanged
+- If the prompt is already clear and complete, return it as-is
 
 ## Context utilization
 
@@ -138,12 +136,10 @@ If the user message contains an "Additional rules to follow strictly" section, t
 
 ## Forbidden
 
-- Output anything other than the raw JSON object
-- Wrap output in code blocks, quotes, or markdown
-- Add conversational openings before or after the JSON ("Here is", "下面是", "提示词如下", etc.)
-- Put a conversational opening inside the "rewritten" field value
 - Answer the prompt or provide a solution
-- Write code
+- Write code (no code blocks, no triple backtick fences)
+- Start with conversational openings: "Here is", "Below is", "I'll help", "Sure", "好的", "当然", "下面是", "以下是", "让我", "我来", "可以的", etc.
+- Add explanations, markdown formatting, or quotes around output
 - Translate the prompt
 - Add pleasantries ("please", "kindly", "thanks")
 - Over-expand a simple prompt
@@ -279,126 +275,6 @@ export function looksLikeAnswer(text: string): boolean {
   return false
 }
 
-// --- Output extraction ---
-
-/**
- * Extract the "rewritten" field from the model's JSON output.
- * Returns null if no valid JSON object with a string "rewritten" field is found.
- *
- * Tries three strategies in order:
- *  1. Direct JSON.parse on the trimmed text
- *  2. JSON inside a ```json``` (or ```) code block
- *  3. A balanced `{...}` object anywhere in the text
- */
-export function extractRewritten(text: string): string | null {
-  const trimmed = text.trim()
-  if (!trimmed) return null
-
-  // 1. Direct JSON parse
-  try {
-    const obj = JSON.parse(trimmed)
-    if (isRewrittenField(obj)) return obj.rewritten
-  } catch {
-    // not pure JSON, continue
-  }
-
-  // 2. JSON inside a code block
-  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
-  if (codeBlockMatch) {
-    try {
-      const obj = JSON.parse(codeBlockMatch[1].trim())
-      if (isRewrittenField(obj)) return obj.rewritten
-    } catch {
-      // not valid JSON in code block, continue
-    }
-  }
-
-  // 3. Find a balanced {...} object in the text
-  const objStr = findBalancedJsonObject(trimmed)
-  if (objStr) {
-    try {
-      const obj = JSON.parse(objStr)
-      if (isRewrittenField(obj)) return obj.rewritten
-    } catch {
-      // not valid JSON, give up
-    }
-  }
-
-  return null
-}
-
-function isRewrittenField(obj: unknown): obj is { rewritten: string } {
-  return (
-    typeof obj === "object" &&
-    obj !== null &&
-    typeof (obj as Record<string, unknown>).rewritten === "string"
-  )
-}
-
-/**
- * Find the first balanced JSON object `{...}` in the text, respecting string
- * boundaries so that braces inside string values don't break the scan.
- * Returns the substring or null.
- */
-function findBalancedJsonObject(text: string): string | null {
-  let depth = 0
-  let start = -1
-  let inString = false
-  let escape = false
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (escape) {
-      escape = false
-      continue
-    }
-    if (inString) {
-      if (c === "\\") escape = true
-      else if (c === '"') inString = false
-      continue
-    }
-    if (c === '"') {
-      inString = true
-      continue
-    }
-    if (c === "{") {
-      if (depth === 0) start = i
-      depth++
-    } else if (c === "}") {
-      depth--
-      if (depth === 0 && start !== -1) {
-        return text.slice(start, i + 1)
-      }
-    }
-  }
-  return null
-}
-
-/**
- * Strip common "here's the optimized prompt:" style preambles from the start
- * of the text. The model sometimes outputs these inside the JSON string value
- * even when instructed not to. Returns the cleaned text.
- */
-export function stripPreamble(text: string): string {
-  const patterns: RegExp[] = [
-    // English
-    /^here'?s?\s+(?:the|your)\s+(?:optimized|rewritten|polished)\s+(?:prompt|version|response)[:：]?\s*/i,
-    /^here\s+is\s+(?:the\s+)?(?:optimized|rewritten|polished)\s+(?:prompt|version|response)[:：]?\s*/i,
-    /^(?:optimized|rewritten|polished)\s+(?:prompt|version|response)[:：]?\s*/i,
-    // Chinese
-    /^优化[后过]?[的]?提示[词语][：:]?\s*/,
-    /^重写[后过]?[的]?提示[词语][：:]?\s*/,
-    /^优化[后过]?[的]?版本[：:]?\s*/,
-    /^重写[后过]?[的]?版本[：:]?\s*/,
-    /^提示词如下[：:]?\s*/,
-    /^以下是?(?:优化[后过]?[的]?|重写[后过]?[的]?)?(?:提示[词语]|版本)[：:]?\s*/,
-  ]
-  let result = text.trim()
-  for (const re of patterns) {
-    result = result.replace(re, "")
-  }
-  return result.trim()
-}
-
 // --- User message construction ---
 
 function buildUserMessage(
@@ -492,8 +368,10 @@ async function polishViaSDK(
     if (promptResp?.data) {
       const text = extractLatestAssistantText([{ info: promptResp.data.info, parts: promptResp.data.parts }])
       if (text) {
-        const out = applyExtractionPipeline(text, original)
-        if (out !== null) return out
+        if (looksLikeAnswer(text)) {
+          return { text: original, success: false, error: "Model produced an answer instead of a rewrite. Try again or rephrase the prompt." }
+        }
+        return { text, success: true }
       }
     }
 
@@ -519,59 +397,15 @@ async function polishViaSDK(
       return { text: original, success: false, error: "No output from model" }
     }
 
-    const out = applyExtractionPipeline(result, original)
-    if (out !== null) return out
-    return { text: original, success: false, error: "Model output could not be parsed. Try again." }
+    if (looksLikeAnswer(result)) {
+      return { text: original, success: false, error: "Model produced an answer instead of a rewrite. Try again or rephrase the prompt." }
+    }
+
+    return { text: result, success: true }
   } catch (err: any) {
     const msg = err?.message || String(err)
     return { text: original, success: false, error: `SDK error: ${msg}` }
   }
-}
-
-/**
- * Apply the layered extraction pipeline to the model's raw output.
- * Returns the polish result on success, or null if extraction failed
- * (caller decides whether to retry/fail/propagate error).
- */
-function applyExtractionPipeline(
-  raw: string,
-  original: string,
-): { text: string; success: boolean; error?: string } | null {
-  // Layer 1-3: JSON extraction (direct / code block / balanced scan)
-  const rewritten = extractRewritten(raw)
-  if (rewritten !== null) {
-    const cleaned = stripPreamble(rewritten)
-    if (!cleaned) return null  // empty "rewritten" field — let caller fail
-    if (looksLikeAnswer(cleaned)) {
-      return {
-        text: original,
-        success: false,
-        error: "Model produced an answer instead of a rewrite. Try again or rephrase the prompt.",
-      }
-    }
-    return { text: cleaned, success: true }
-  }
-
-  // Layer 4: JSON failed, try stripping preamble from raw text
-  const stripped = stripPreamble(raw)
-  if (stripped && stripped !== raw.trim() && !looksLikeAnswer(stripped)) {
-    return { text: stripped, success: true }
-  }
-
-  // Layer 5: looksLikeAnswer on raw text (last chance)
-  if (looksLikeAnswer(raw)) {
-    return {
-      text: original,
-      success: false,
-      error: "Model produced an answer instead of a rewrite. Try again or rephrase the prompt.",
-    }
-  }
-
-  // Final fallback: use raw text as-is (model gave a rewrite but in unexpected format)
-  const trimmed = raw.trim()
-  if (trimmed) return { text: trimmed, success: true }
-
-  return null
 }
 
 // --- Plugin ---
