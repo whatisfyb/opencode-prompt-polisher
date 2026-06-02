@@ -55,6 +55,84 @@ function looksLikeAnswer(text) {
   return false
 }
 
+// Inline copy of extractRewritten
+function isRewrittenField(obj) {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    typeof obj.rewritten === "string"
+  )
+}
+
+function findBalancedJsonObject(text) {
+  let depth = 0
+  let start = -1
+  let inString = false
+  let escape = false
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (escape) { escape = false; continue }
+    if (inString) {
+      if (c === "\\") escape = true
+      else if (c === '"') inString = false
+      continue
+    }
+    if (c === '"') { inString = true; continue }
+    if (c === "{") {
+      if (depth === 0) start = i
+      depth++
+    } else if (c === "}") {
+      depth--
+      if (depth === 0 && start !== -1) return text.slice(start, i + 1)
+    }
+  }
+  return null
+}
+
+function extractRewritten(text) {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  try {
+    const obj = JSON.parse(trimmed)
+    if (isRewrittenField(obj)) return obj.rewritten
+  } catch {}
+  const codeBlockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (codeBlockMatch) {
+    try {
+      const obj = JSON.parse(codeBlockMatch[1].trim())
+      if (isRewrittenField(obj)) return obj.rewritten
+    } catch {}
+  }
+  const objStr = findBalancedJsonObject(trimmed)
+  if (objStr) {
+    try {
+      const obj = JSON.parse(objStr)
+      if (isRewrittenField(obj)) return obj.rewritten
+    } catch {}
+  }
+  return null
+}
+
+// Inline copy of stripPreamble
+function stripPreamble(text) {
+  const patterns = [
+    /^here'?s?\s+(?:the|your)\s+(?:optimized|rewritten|polished)\s+(?:prompt|version|response)[:：]?\s*/i,
+    /^here\s+is\s+(?:the\s+)?(?:optimized|rewritten|polished)\s+(?:prompt|version|response)[:：]?\s*/i,
+    /^(?:optimized|rewritten|polished)\s+(?:prompt|version|response)[:：]?\s*/i,
+    /^优化[后过]?[的]?提示[词语][：:]?\s*/,
+    /^重写[后过]?[的]?提示[词语][：:]?\s*/,
+    /^优化[后过]?[的]?版本[：:]?\s*/,
+    /^重写[后过]?[的]?版本[：:]?\s*/,
+    /^提示词如下[：:]?\s*/,
+    /^以下是?(?:优化[后过]?[的]?|重写[后过]?[的]?)?(?:提示[词语]|版本)[：:]?\s*/,
+  ]
+  let result = text.trim()
+  for (const re of patterns) {
+    result = result.replace(re, "")
+  }
+  return result.trim()
+}
+
 const cfg = {
   ...DEFAULT_CONFIG,
   rules: {
@@ -169,6 +247,63 @@ for (const t of answerTests) {
     pass++
   } else {
     console.log(`FAIL  ${t.name}: expected ${t.expect}, got ${got}`)
+    fail++
+  }
+}
+
+console.log()
+console.log("--- extractRewritten ---")
+const extractTests = [
+  // Should extract
+  { name: "direct JSON", input: '{"rewritten": "hello world"}', expect: "hello world" },
+  { name: "JSON with whitespace", input: '  \n  {"rewritten": "hello"}  \n  ', expect: "hello" },
+  { name: "JSON in code block", input: '```json\n{"rewritten": "hello"}\n```', expect: "hello" },
+  { name: "JSON in plain code block", input: '```\n{"rewritten": "hello"}\n```', expect: "hello" },
+  { name: "JSON with preamble text", input: 'Here is the result:\n{"rewritten": "hello"}\nHope this helps!', expect: "hello" },
+  { name: "JSON with Chinese chars in value", input: '{"rewritten": "优化后的提示词"}', expect: "优化后的提示词" },
+  { name: "JSON with escaped quotes in value", input: '{"rewritten": "He said \\"hi\\" to me"}', expect: 'He said "hi" to me' },
+  // Should return null
+  { name: "missing rewritten field", input: '{"result": "hello"}', expect: null },
+  { name: "rewritten is number", input: '{"rewritten": 123}', expect: null },
+  { name: "rewritten is null", input: '{"rewritten": null}', expect: null },
+  { name: "invalid JSON", input: 'not json at all', expect: null },
+  { name: "empty string", input: '', expect: null },
+  { name: "JSON with braces in string value", input: '{"rewritten": "use foo() in { block }"}', expect: "use foo() in { block }" },
+]
+for (const t of extractTests) {
+  const got = extractRewritten(t.input)
+  const ok = got === t.expect
+  if (ok) {
+    console.log(`PASS  ${t.name}`)
+    pass++
+  } else {
+    console.log(`FAIL  ${t.name}: expected ${JSON.stringify(t.expect)}, got ${JSON.stringify(got)}`)
+    fail++
+  }
+}
+
+console.log()
+console.log("--- stripPreamble ---")
+const stripTests = [
+  { name: "English 'Here's the optimized prompt:'", input: "Here's the optimized prompt:\n\nFix the bug", expect: "Fix the bug" },
+  { name: "English 'Here is the rewritten version:'", input: "Here is the rewritten version:\n\nFix the bug", expect: "Fix the bug" },
+  { name: "English 'Optimized prompt:'", input: "Optimized prompt: Fix the bug", expect: "Fix the bug" },
+  { name: "Chinese '优化后的提示词：'", input: "优化后的提示词：\n\n修复这个 bug", expect: "修复这个 bug" },
+  { name: "Chinese '重写后的版本：'", input: "重写后的版本：\n\n修复这个 bug", expect: "修复这个 bug" },
+  { name: "Chinese '提示词如下'", input: "提示词如下：\n\n修复这个 bug", expect: "修复这个 bug" },
+  { name: "Chinese '以下是优化后的提示词：'", input: "以下是优化后的提示词：\n\n修复这个 bug", expect: "修复这个 bug" },
+  { name: "no preamble", input: "Fix the bug", expect: "Fix the bug" },
+  { name: "empty", input: "", expect: "" },
+  { name: "whitespace only", input: "   \n  ", expect: "" },
+]
+for (const t of stripTests) {
+  const got = stripPreamble(t.input)
+  const ok = got === t.expect
+  if (ok) {
+    console.log(`PASS  ${t.name}`)
+    pass++
+  } else {
+    console.log(`FAIL  ${t.name}: expected ${JSON.stringify(t.expect)}, got ${JSON.stringify(got)}`)
     fail++
   }
 }
