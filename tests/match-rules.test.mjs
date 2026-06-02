@@ -1,0 +1,125 @@
+// Standalone test runner for matchRules
+// Run with: node tests/match-rules.test.mjs
+
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
+// Inline a copy of matchRules + types for testing without bundler
+const DEFAULT_CONFIG = {
+  model: "",
+  context: { maxMessages: 6, maxCharsPerMessage: 500 },
+  intensity: "medium",
+  rules: { default: [], patterns: [] },
+}
+
+function matchRules(prompt, config) {
+  const matched = []
+  const rules = config.rules
+  if (Array.isArray(rules.default)) {
+    for (const r of rules.default) {
+      if (typeof r === "string" && r.trim()) matched.push(r.trim())
+    }
+  }
+  if (Array.isArray(rules.patterns)) {
+    const lower = prompt.toLowerCase()
+    for (const pattern of rules.patterns) {
+      if (!pattern || !Array.isArray(pattern.match) || typeof pattern.rule !== "string") continue
+      const hit = pattern.match.some((kw) => {
+        if (typeof kw !== "string" || !kw) return false
+        return lower.includes(kw.toLowerCase())
+      })
+      if (hit && pattern.rule.trim()) {
+        matched.push(pattern.rule.trim())
+      }
+    }
+  }
+  return matched
+}
+
+const cfg = {
+  ...DEFAULT_CONFIG,
+  rules: {
+    default: ["Keep language consistent with input"],
+    patterns: [
+      { match: ["code", "function", "写", "实现"], rule: "Prefer TypeScript" },
+      { match: ["sql", "database", "数据库"], rule: "Use CTEs over subqueries" },
+      { match: ["doc", "README", "文档"], rule: "Use Markdown headings" },
+    ],
+  },
+}
+
+const tests = [
+  {
+    name: "code keyword (Chinese)",
+    prompt: "写一个登录函数",
+    expected: ["Keep language consistent with input", "Prefer TypeScript"],
+  },
+  {
+    name: "sql keyword (English)",
+    prompt: "optimize this SQL query",
+    expected: ["Keep language consistent with input", "Use CTEs over subqueries"],
+  },
+  {
+    name: "doc keyword (mixed)",
+    prompt: "update README and docs",
+    expected: ["Keep language consistent with input", "Use Markdown headings"],
+  },
+  {
+    name: "no match",
+    prompt: "asdf qwerty",
+    expected: ["Keep language consistent with input"],
+  },
+  {
+    name: "case-insensitive match",
+    prompt: "Write a FUNCTION in TypeScript",
+    expected: ["Keep language consistent with input", "Prefer TypeScript"],
+  },
+  {
+    name: "multiple patterns match",
+    prompt: "写一个 SQL 函数",
+    expected: ["Keep language consistent with input", "Prefer TypeScript", "Use CTEs over subqueries"],
+  },
+  {
+    name: "no rules config",
+    prompt: "anything",
+    config: { ...DEFAULT_CONFIG, rules: { default: [], patterns: [] } },
+    expected: [],
+  },
+  {
+    name: "no default, no match",
+    prompt: "hello world",
+    config: {
+      ...DEFAULT_CONFIG,
+      rules: { default: [], patterns: [{ match: ["code"], rule: "Prefer TypeScript" }] },
+    },
+    expected: [],
+  },
+]
+
+let pass = 0
+let fail = 0
+for (const t of tests) {
+  const c = t.config ?? cfg
+  const got = matchRules(t.prompt, c)
+  let allOk = got.length === t.expected.length
+  if (allOk) {
+    for (let i = 0; i < t.expected.length; i++) {
+      if (!got.includes(t.expected[i])) {
+        allOk = false
+        break
+      }
+    }
+  }
+  if (allOk) {
+    console.log(`PASS  ${t.name}`)
+    pass++
+  } else {
+    console.log(`FAIL  ${t.name}`)
+    console.log(`      expected: ${JSON.stringify(t.expected)}`)
+    console.log(`      got:      ${JSON.stringify(got)}`)
+    fail++
+  }
+}
+
+console.log(`\n${pass}/${pass + fail} tests passed`)
+process.exit(fail === 0 ? 0 : 1)

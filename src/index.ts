@@ -5,16 +5,32 @@ import { homedir } from "node:os"
 
 // --- Config ---
 
+interface RulePattern {
+  /** Keywords to match (case-insensitive substring). Any single match triggers the rule. */
+  match: string[]
+  /** The rule text to inject when triggered. */
+  rule: string
+}
+
+interface RulesConfig {
+  /** Baseline rules always included (array of strings, joined with newlines). */
+  default?: string[]
+  /** Conditional rules triggered by keyword matches. */
+  patterns?: RulePattern[]
+}
+
 interface PolishConfig {
   model: string
   context: { maxMessages: number; maxCharsPerMessage: number }
   intensity: "light" | "medium" | "heavy"
+  rules: RulesConfig
 }
 
 const DEFAULT_CONFIG: PolishConfig = {
   model: "opencode/deepseek-v4-flash-free",
   context: { maxMessages: 6, maxCharsPerMessage: 500 },
   intensity: "medium",
+  rules: { default: [], patterns: [] },
 }
 
 function loadConfig(): PolishConfig {
@@ -42,6 +58,14 @@ function loadConfig(): PolishConfig {
               DEFAULT_CONFIG.context.maxCharsPerMessage,
           },
           intensity: parsed.intensity ?? DEFAULT_CONFIG.intensity,
+          rules: {
+            default: Array.isArray(parsed.rules?.default)
+              ? parsed.rules.default
+              : [],
+            patterns: Array.isArray(parsed.rules?.patterns)
+              ? parsed.rules.patterns
+              : [],
+          },
         }
       } catch {
         // Config parse failed — use defaults
@@ -106,6 +130,13 @@ When conversation context is provided:
 - If there's an active task or error → reference it explicitly with details from context
 - If tech stack is clear from context → use correct terminology and API names
 - If previous assistant response contains relevant code → reference it by name
+
+## Additional rules (hard constraints)
+
+If the user message contains an "Additional rules to follow strictly" section, those rules are HARD CONSTRAINTS — you MUST enforce them in the rewritten prompt. Treat them as non-negotiable requirements that override default rewrite style:
+- Reflect every additional rule in the optimized prompt (e.g., if rule says "prefer TypeScript over JavaScript", the rewritten prompt must specify TypeScript)
+- Do NOT ignore or weaken additional rules
+- Do NOT add explanations about which rules were applied
 
 ## Forbidden
 
@@ -174,6 +205,67 @@ function extractLatestAssistantText(messages: any[]): string | null {
   return null
 }
 
+// --- Rule matching ---
+
+/**
+ * Match the user's prompt against conditional rules and return the rules to inject.
+ * Returns an array of rule strings. `default` is always included; patterns are
+ * included when any of their `match` keywords appear in the prompt (case-insensitive
+ * substring match). Multiple patterns can match simultaneously.
+ */
+export function matchRules(prompt: string, config: PolishConfig): string[] {
+  const matched: string[] = []
+  const rules = config.rules
+
+  // Always include default rules
+  if (Array.isArray(rules.default)) {
+    for (const r of rules.default) {
+      if (typeof r === "string" && r.trim()) matched.push(r.trim())
+    }
+  }
+
+  // Match conditional patterns
+  if (Array.isArray(rules.patterns)) {
+    const lower = prompt.toLowerCase()
+    for (const pattern of rules.patterns) {
+      if (!pattern || !Array.isArray(pattern.match) || typeof pattern.rule !== "string") continue
+      const hit = pattern.match.some((kw) => {
+        if (typeof kw !== "string" || !kw) return false
+        return lower.includes(kw.toLowerCase())
+      })
+      if (hit && pattern.rule.trim()) {
+        matched.push(pattern.rule.trim())
+      }
+    }
+  }
+
+  return matched
+}
+
+// --- User message construction ---
+
+function buildUserMessage(
+  original: string,
+  context: string,
+  config: PolishConfig,
+): string {
+  const sections: string[] = []
+
+  if (context) {
+    sections.push(`Recent conversation:\n\n${context}`)
+  }
+
+  const matchedRules = matchRules(original, config)
+  if (matchedRules.length > 0) {
+    const rulesBlock = matchedRules.map((r) => `- ${r}`).join("\n")
+    sections.push(`Additional rules to follow strictly:\n\n${rulesBlock}`)
+  }
+
+  sections.push(`Optimize this prompt:\n\n${original}`)
+
+  return sections.join("\n\n---\n\n")
+}
+
 // --- LLM call via OpenCode SDK ---
 
 async function polishViaSDK(
@@ -189,9 +281,7 @@ async function polishViaSDK(
     return { text: original, success: false, error: `Invalid model format "${config.model}", expected "provider/model-id"` }
   }
 
-  const userMsg = context
-    ? `Recent conversation:\n\n${context}\n\n---\n\nOptimize this prompt:\n\n${original}`
-    : `Optimize this prompt:\n\n${original}`
+  const userMsg = buildUserMessage(original, context, config)
 
   try {
     // 1. Create child session (same pattern as magic-context historian)
