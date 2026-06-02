@@ -1,58 +1,22 @@
-// Standalone test runner for matchRules
-// Run with: node tests/match-rules.test.mjs
+// Standalone test runner for matchRules + looksLikeAnswer + stripJsoncComments
+// Run with: npm test  (which builds dist/ first, then runs this file)
+//
+// IMPORTANT: this file imports the BUNDLED output (../dist/index.js), not
+// a copy of the source. This prevents the inlined-test pattern from drifting
+// out of sync with the real implementation (which nearly caused a missed
+// bug in the v0.1.6 → v0.1.7 transition).
 
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
+import {
+  matchRules,
+  looksLikeAnswer,
+  stripJsoncComments,
+} from "../dist/index.js"
 
-// Minimal mock for file ops (not actually used by the inlined functions)
-void readFileSync
-void join
-
-// Inline a copy of matchRules + types for testing without bundler
 const DEFAULT_CONFIG = {
   model: "",
   context: { maxMessages: 6, maxCharsPerMessage: 500 },
   intensity: "medium",
   rules: { default: [], patterns: [] },
-}
-
-function matchRules(prompt, config) {
-  const matched = []
-  const rules = config.rules
-  if (Array.isArray(rules.default)) {
-    for (const r of rules.default) {
-      if (typeof r === "string" && r.trim()) matched.push(r.trim())
-    }
-  }
-  if (Array.isArray(rules.patterns)) {
-    const lower = prompt.toLowerCase()
-    for (const pattern of rules.patterns) {
-      if (!pattern || !Array.isArray(pattern.match) || typeof pattern.rule !== "string") continue
-      const hit = pattern.match.some((kw) => {
-        if (typeof kw !== "string" || !kw) return false
-        return lower.includes(kw.toLowerCase())
-      })
-      if (hit && pattern.rule.trim()) {
-        matched.push(pattern.rule.trim())
-      }
-    }
-  }
-  return matched
-}
-
-// Inline copy of looksLikeAnswer
-function looksLikeAnswer(text) {
-  const t = text.trim()
-  if (!t) return true
-  const answerPrefixRe =
-    /^(here('s| is)?\b|below\b|sure\b|of course\b|absolutely\b|certainly\b|i('ll| will| can)\b|let me\b|好的[，,。 ]?|当然[可以，,。 ]?|下面是|以下是|让我|我来|可以的|没问[题到]|当然可[以到])/i
-  if (answerPrefixRe.test(t)) return true
-  if (/```/.test(t)) return true
-  const helpfulEnRe =
-    /\b(i can help|i can assist|let me know|feel free to|here to help)\b/i
-  const helpfulZhRe = /希望对[你您]有帮助|希望能帮[到助]/
-  if (helpfulEnRe.test(t) || helpfulZhRe.test(t)) return true
-  return false
 }
 
 const cfg = {
@@ -169,6 +133,95 @@ for (const t of answerTests) {
     pass++
   } else {
     console.log(`FAIL  ${t.name}: expected ${t.expect}, got ${got}`)
+    fail++
+  }
+}
+
+console.log()
+console.log("--- stripJsoncComments ---")
+// Round-trip a config through stripJsoncComments and JSON.parse — the input
+// must remain valid JSON, and `//` inside strings must survive intact.
+const commentTests = [
+  {
+    name: "plain JSON (no comments)",
+    input: '{"a": 1, "b": 2}',
+    parsed: { a: 1, b: 2 },
+  },
+  {
+    name: "line comment is stripped",
+    input: '{\n  "a": 1, // inline comment\n  "b": 2\n}',
+    parsed: { a: 1, b: 2 },
+  },
+  {
+    name: "block comment is stripped",
+    input: '{ /* a block */ "a": 1, /* multi\nline */ "b": 2 }',
+    parsed: { a: 1, b: 2 },
+  },
+  {
+    name: "// inside string is preserved (the bug we fixed)",
+    input: '{ "rule": "Prefer TS // strict" }',
+    parsed: { rule: "Prefer TS // strict" },
+  },
+  {
+    name: "/* inside string is preserved",
+    input: '{ "rule": "use /* strict */ mode" }',
+    parsed: { rule: "use /* strict */ mode" },
+  },
+  {
+    name: "escaped quote inside string is handled",
+    input: '{ "url": "https://example.com/\\"path\\"" }',
+    parsed: { url: 'https://example.com/"path"' },
+  },
+  {
+    name: "comment-like content inside string is not affected",
+    input: '{ "msg": "hello // world /* still inside */" }',
+    parsed: { msg: "hello // world /* still inside */" },
+  },
+  {
+    name: "realistic polish.jsonc fragment",
+    input: `{
+  // Provider/model
+  "model": "opencode-go/deepseek-v4-flash",
+  "context": {
+    "maxMessages": 4,    // tightened
+    "maxCharsPerMessage": 400
+  },
+  "rules": {
+    "default": ["Speak Chinese"],
+    "patterns": [
+      { "match": ["code"], "rule": "TS over JS" } // test/code prompts
+    ]
+  }
+}`,
+    parsed: {
+      model: "opencode-go/deepseek-v4-flash",
+      context: { maxMessages: 4, maxCharsPerMessage: 400 },
+      rules: {
+        default: ["Speak Chinese"],
+        patterns: [{ match: ["code"], rule: "TS over JS" }],
+      },
+    },
+  },
+]
+for (const t of commentTests) {
+  const stripped = stripJsoncComments(t.input)
+  let parsed
+  try {
+    parsed = JSON.parse(stripped)
+  } catch (e) {
+    console.log(`FAIL  ${t.name}: JSON.parse failed: ${e.message}`)
+    console.log(`      stripped: ${JSON.stringify(stripped)}`)
+    fail++
+    continue
+  }
+  const ok = JSON.stringify(parsed) === JSON.stringify(t.parsed)
+  if (ok) {
+    console.log(`PASS  ${t.name}`)
+    pass++
+  } else {
+    console.log(`FAIL  ${t.name}`)
+    console.log(`      expected: ${JSON.stringify(t.parsed)}`)
+    console.log(`      got:      ${JSON.stringify(parsed)}`)
     fail++
   }
 }

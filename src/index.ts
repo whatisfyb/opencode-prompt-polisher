@@ -4,6 +4,11 @@ import { join } from "node:path"
 import { homedir } from "node:os"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 
+/** Module-level mutex: prevents concurrent /polish invocations from racing
+ * on TUI prompt/submit operations (which would result in duplicate sends
+ * or prompt text being overwritten mid-flight). */
+let isPolishing = false
+
 // --- Config ---
 
 interface RulePattern {
@@ -43,11 +48,10 @@ function loadConfig(): PolishConfig {
     if (existsSync(p)) {
       try {
         const raw = readFileSync(p, "utf-8")
-        // Strip JSONC comments (lines starting with //)
-        const cleaned = raw
-          .split("\n")
-          .map((l) => l.replace(/\/\/.*$/, ""))
-          .join("\n")
+        // Strip JSONC comments (line + block) while preserving `//` and `/*`
+        // when they appear inside string literals — a regex-based strip
+        // would silently truncate rule strings like "Prefer TS // strict".
+        const cleaned = stripJsoncComments(raw)
         const parsed = JSON.parse(cleaned)
         return {
           model: parsed.model ?? DEFAULT_CONFIG.model,
@@ -74,6 +78,58 @@ function loadConfig(): PolishConfig {
     }
   }
   return DEFAULT_CONFIG
+}
+
+/**
+ * Remove `//` line and `/* *\/` block comments from a JSONC string while
+ * preserving these tokens when they appear inside string literals. Also
+ * honors backslash-escaped quotes inside strings.
+ *
+ * Exported for unit testing — see tests/match-rules.test.mjs.
+ */
+export function stripJsoncComments(input: string): string {
+  let out = ""
+  let i = 0
+  let inString = false
+  let escape = false
+  const n = input.length
+  while (i < n) {
+    const c = input[i]!
+    const next = input[i + 1]
+    if (inString) {
+      out += c
+      if (escape) {
+        escape = false
+      } else if (c === "\\") {
+        escape = true
+      } else if (c === '"') {
+        inString = false
+      }
+      i++
+      continue
+    }
+    if (c === '"') {
+      inString = true
+      out += c
+      i++
+      continue
+    }
+    if (c === "/" && next === "/") {
+      // line comment — skip to (but keep) the newline
+      while (i < n && input[i] !== "\n") i++
+      continue
+    }
+    if (c === "/" && next === "*") {
+      // block comment — skip past closing */
+      i += 2
+      while (i < n - 1 && !(input[i] === "*" && input[i + 1] === "/")) i++
+      i += 2
+      continue
+    }
+    out += c
+    i++
+  }
+  return out
 }
 
 // --- Model parsing ---
@@ -537,6 +593,13 @@ const server: Plugin = async (ctx) => {
         prompt: POLISH_SYSTEM_PROMPT,
         tools: {},
         maxSteps: 1,
+        // Permission deny-list. OpenCode's plugin permission system requires
+        // explicit per-capability entries — there is no wildcard, so any
+        // new permission type added in a future OpenCode version will
+        // default to "allow" for this subagent until added below.
+        // Known as of OpenCode 1.x: edit, bash, webfetch, doom_loop,
+        // external_directory. When upgrading, audit OpenCode's permission
+        // type list and extend this map.
         permission: {
           edit: "deny",
           bash: "deny",
@@ -552,6 +615,22 @@ const server: Plugin = async (ctx) => {
     "command.execute.before": async (input, output) => {
       // Shared polish logic
       const runPolish = async (original: string, autoSend: boolean) => {
+        if (isPolishing) {
+          try {
+            await ctx.client.tui.showToast({
+              body: {
+                title: "Polish Busy",
+                message: "Already polishing, please wait.",
+                variant: "error",
+                duration: 3000,
+              },
+            })
+          } catch {
+            // TUI may be unavailable — silently bail
+          }
+          return
+        }
+        isPolishing = true
         // Reload config on every invocation for hot-reload
         const config = loadConfig()
         try {
@@ -625,6 +704,8 @@ const server: Plugin = async (ctx) => {
           } catch {
             // Last resort
           }
+        } finally {
+          isPolishing = false
         }
       }
 
