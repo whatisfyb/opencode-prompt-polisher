@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 import { homedir } from "node:os"
+import { createOpencodeClient } from "@opencode-ai/sdk/v2/client"
 
 // --- Config ---
 
@@ -94,6 +95,28 @@ function parseModel(model: string): ModelRef | null {
 // --- System prompt ---
 
 const POLISH_AGENT = "polish"
+
+// V2 SDK hard-constraint schema. Server creates a virtual `StructuredOutput` tool
+// using this as `inputSchema`, sets `tool_choice: "required"` at the provider API
+// layer, validates the tool call arguments against this schema, and retries on
+// failure up to `retryCount` times. The validated object is returned via
+// `info.structured` on the assistant message.
+//
+// We force the model to wrap its output in { "rewritten": "..." } so the
+// rewrite is structurally separated from any preamble/analysis — the only
+// field on the result that the plugin reads is `rewritten`.
+const POLISH_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    rewritten: {
+      type: "string",
+      description:
+        "The optimized prompt — ONLY the rewritten text, no preamble, no analysis, no quotes, no markdown.",
+    },
+  },
+  required: ["rewritten"],
+  additionalProperties: false,
+} as const
 
 const POLISH_SYSTEM_PROMPT = `You are a text transformation function, not an AI assistant.
 
@@ -308,23 +331,109 @@ function buildUserMessage(
 
 // --- LLM call via OpenCode SDK ---
 
+type PolishResult = { text: string; success: boolean; error?: string }
+
+/**
+ * Orchestrator: try V2 (hard JSON constraint) first, fall back to V1 (soft).
+ * Receives the plugin `ctx` so it can build a V2 client against `ctx.serverUrl`.
+ */
 async function polishViaSDK(
-  client: any,
+  ctx: any,
   parentSessionId: string,
   sessionDirectory: string | undefined,
   original: string,
   context: string,
   config: PolishConfig,
-): Promise<{ text: string; success: boolean; error?: string }> {
+): Promise<PolishResult> {
   const modelRef = parseModel(config.model)
   if (!modelRef) {
     return { text: original, success: false, error: `Invalid model format "${config.model}", expected "provider/model-id"` }
   }
 
   const userMsg = buildUserMessage(original, context, config)
+  const v1Client: any = ctx.client
 
+  // ── Path A: V2 SDK + format: json_schema (hard constraint) ──
   try {
-    // 1. Create child session (same pattern as magic-context historian)
+    return await polishViaV2(ctx, parentSessionId, sessionDirectory, userMsg, modelRef, original)
+  } catch (v2Err: any) {
+    const v2Msg = v2Err?.message || String(v2Err)
+    // V2 unavailable (server too old / no tool calling support / etc.) — fall back
+    return await polishViaV1(v1Client, parentSessionId, sessionDirectory, userMsg, modelRef, original, v2Msg)
+  }
+}
+
+/**
+ * V2 path: server enforces JSON via virtual `StructuredOutput` tool + tool_choice:required.
+ * The validated object is read directly from `info.structured` — no parsing needed.
+ */
+async function polishViaV2(
+  ctx: any,
+  parentSessionId: string,
+  sessionDirectory: string | undefined,
+  userMsg: string,
+  modelRef: ModelRef,
+  original: string,
+): Promise<PolishResult> {
+  const v2 = createOpencodeClient({ baseUrl: ctx.serverUrl.href })
+
+  // 1. Create child session (top-level params, no body/query wrappers)
+  const createResp = await v2.session.create({
+    parentID: parentSessionId,
+    title: "polish-compartment",
+    ...(sessionDirectory ? { directory: sessionDirectory } : {}),
+  })
+  const childId: string | undefined = createResp?.data?.id
+  if (!childId || typeof childId !== "string") {
+    throw new Error("v2: failed to create child session")
+  }
+
+  // 2. Send prompt with hard JSON constraint
+  const promptResp = await v2.session.prompt({
+    sessionID: childId,
+    agent: POLISH_AGENT,
+    model: { providerID: modelRef.providerID, modelID: modelRef.modelID },
+    parts: [{ type: "text", text: userMsg, synthetic: true }],
+    format: {
+      type: "json_schema",
+      schema: POLISH_JSON_SCHEMA,
+      retryCount: 3,
+    },
+    ...(sessionDirectory ? { directory: sessionDirectory } : {}),
+  })
+
+  // 3. Surface API errors (e.g. Insufficient balance)
+  const info: any = promptResp?.data?.info
+  if (info?.error) {
+    const apiError = info.error
+    throw new Error(`Model error: ${apiError.message || apiError.name || "unknown"}`)
+  }
+
+  // 4. Read validated structured output (server has already verified against schema)
+  const rewritten = (info?.structured as { rewritten?: unknown } | undefined)?.rewritten
+  if (typeof rewritten === "string" && rewritten.trim()) {
+    return { text: rewritten.trim(), success: true }
+  }
+
+  // No structured output (very rare — model produced nothing usable)
+  throw new Error("v2: info.structured.rewritten missing or empty")
+}
+
+/**
+ * V1 path: v0.1.6 soft-constraint logic. Used only when V2 fails.
+ * Includes the full extraction pipeline: promptResp → messages() → looksLikeAnswer.
+ */
+async function polishViaV1(
+  client: any,
+  parentSessionId: string,
+  sessionDirectory: string | undefined,
+  userMsg: string,
+  modelRef: ModelRef,
+  original: string,
+  v2ErrorMsg: string,
+): Promise<PolishResult> {
+  try {
+    // 1. Create child session
     const createResp = await client.session.create({
       body: {
         parentID: parentSessionId,
@@ -344,7 +453,7 @@ async function polishViaSDK(
       return { text: original, success: false, error: "Failed to create child session" }
     }
 
-    // 2. Send prompt to child session with polish agent (no tools)
+    // 2. Send prompt (no format field — soft constraint via system prompt)
     const promptResp = await client.session.prompt({
       path: { id: childId },
       ...(sessionDirectory ? { query: { directory: sessionDirectory } } : {}),
@@ -383,7 +492,6 @@ async function polishViaSDK(
 
     const messages = normalizeResponse(messagesResponse)
 
-    // Check for errors in assistant messages
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]?.info?.role === "assistant" && messages[i]?.info?.error) {
         const apiError = messages[i].info.error
@@ -394,7 +502,7 @@ async function polishViaSDK(
 
     const result = extractLatestAssistantText(messages)
     if (!result) {
-      return { text: original, success: false, error: "No output from model" }
+      return { text: original, success: false, error: `No output from model (v2 path failed: ${v2ErrorMsg})` }
     }
 
     if (looksLikeAnswer(result)) {
@@ -404,7 +512,7 @@ async function polishViaSDK(
     return { text: result, success: true }
   } catch (err: any) {
     const msg = err?.message || String(err)
-    return { text: original, success: false, error: `SDK error: ${msg}` }
+    return { text: original, success: false, error: `SDK error: ${msg} (v2 path failed: ${v2ErrorMsg})` }
   }
 }
 
@@ -471,9 +579,9 @@ const server: Plugin = async (ctx) => {
             // no context — polish without it
           }
 
-          // Polish via OpenCode SDK
+          // Polish via OpenCode SDK (V2 first, V1 fallback)
           const result = await polishViaSDK(
-            ctx.client,
+            ctx,
             input.sessionID,
             undefined,
             original,
