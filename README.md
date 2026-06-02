@@ -1,53 +1,56 @@
 # opencode-prompt-polisher
 
-An [OpenCode](https://opencode.ai) plugin that AI-optimizes your prompts using conversation context.
+OpenCode 插件：基于对话上下文自动优化你的提示词。
 
 ```
-/polish 帮我写个带搜索的 table 组件
+/polish 帮我写个搜索表格
 ```
+
 ↓
+
 ```
-在现有 Ant Design Pro 项目中，基于 ProTable 封装一个支持服务端搜索、分页、多列排序的通用表格组件。需求：
+在现有 Ant Design Pro 项目中，基于 ProTable 封装一个支持服务端搜索、分页、多列排序
+的通用表格组件。需求：
 1. 搜索表单支持关键词模糊匹配和状态下拉筛选
 2. 表格列支持点击排序，默认按创建时间倒序
 3. 分页使用后端返回的 total/page/pageSize
 4. 类型定义用 TypeScript interface
 ```
 
-## Features
+## 功能
 
-- **Context-aware** — injects recent conversation context (file names, error messages, tech stack) into the optimization
-- **Auto-send** — `/polish-send` fills and auto-submits the optimized prompt
-- **Safe subagent** — runs as a restricted hidden agent with no tool access, guaranteed never to execute your request instead of optimizing it
-- **Configurable** — model, context window, and intensity via `polish.jsonc`
+- **感知上下文** — 注入最近的对话消息（文件路径、错误信息、技术栈）作为优化依据
+- **安全子 agent** — 在隐藏的子 agent 中运行，工具集为空，绝不会代替你执行需求
+- **可配置** — 模型、上下文窗口、优化强度都通过 `polish.jsonc` 配置
+- **热重载** — 修改配置文件无需重启 OpenCode
 
-## Installation
+## 安装
 
-### Via GitHub (recommended)
+### npm（推荐）
+
+编辑 `~/.config/opencode/opencode.json`：
 
 ```jsonc
-// ~/.config/opencode/opencode.json
 {
   "plugin": [
-    "whatisfyb/opencode-prompt-polisher"
-    // other plugins...
+    "opencode-prompt-polisher"
   ]
 }
 ```
 
-### Local development
+重启 OpenCode。
+
+### 本地开发
 
 ```jsonc
-// ~/.config/opencode/opencode.json
 {
   "plugin": [
-    "C:\\Users\\<you>\\Desktop\\opencode-prompt-polisher"
-    // other plugins...
+    "C:\\path\\to\\opencode-prompt-polisher"
   ]
 }
 ```
 
-Then build:
+然后：
 
 ```powershell
 cd path/to/opencode-prompt-polisher
@@ -55,93 +58,76 @@ npm install
 npm run build
 ```
 
-Restart OpenCode. Type `/polish` to verify it's registered.
+## 命令
 
-## Usage
-
-| Command | Description |
+| 命令 | 行为 |
 |---|---|
-| `/polish <prompt>` | Optimize the prompt and put the result in the input box (waiting for you to edit or send) |
-| `/polish-send <prompt>` | Optimize and auto-send immediately |
+| `/polish <prompt>` | 优化后填入输入框，等你编辑或发送 |
+| `/polish-send <prompt>` | 优化后自动发送 |
 
-### Examples
-
-```
-You:  /polish 这个函数的性能有问题，帮我优化一下
-
-# ⏳ (toast: loading)
-# Input box now contains the optimized version
-# Toast: "Polish Ready — Optimized prompt loaded. Press Enter to send, or edit first."
-You:  (edit if needed) → Enter
-```
+### 示例
 
 ```
-You:  /polish-send 写一个二分查找
-
-# ⏳ (toast: loading)
-# Result is auto-sent without further action
+/polish 这个函数性能有问题
 ```
 
-## Configuration
+→ 输入框出现优化后的提示词，弹出 "Polish Ready" 提示。你可以直接发送，也可以先编辑。
 
-Create `~/.config/opencode/polish.jsonc`:
+```
+/polish-send 写一个二分查找
+```
+
+→ 优化后直接发送，无需再操作。
+
+## 配置
+
+创建 `~/.config/opencode/polish.jsonc`：
 
 ```jsonc
 {
-  // Required: model in "provider/model-id" format
-  // Uses OpenCode's provider routing (no apiKey needed separately)
+  // 模型，格式 "provider/model-id"
+  // 通过 OpenCode 内部路由调用，无需单独配置 apiKey
   "model": "opencode/deepseek-v4-flash-free",
 
-  // Optional: context extraction settings
+  // 上下文提取设置
   "context": {
-    "maxMessages": 6,        // recent messages to inject as context
-    "maxCharsPerMessage": 500  // truncate each message to this length
+    "maxMessages": 6,           // 注入最近 N 条消息
+    "maxCharsPerMessage": 500   // 每条消息截断到该长度
   },
 
-  // Optional: optimization intensity
-  // "light"   — minimal changes, fix only clarity issues
-  // "medium"  — standard optimization (default)
-  // "heavy"   — aggressive rewriting with maximum detail
+  // 优化强度（仅配置文件生效，不会出现在优化指令中）
+  // "light"  - 最小改动，只修正歧义
+  // "medium" - 标准优化（默认）
+  // "heavy"  - 激进重写，补充最大细节
   "intensity": "medium"
 }
 ```
 
-If no config file is found, defaults are used (model: `opencode/deepseek-v4-flash-free`, medium intensity).
+不创建配置文件也能用，会用内置默认值。
 
-## How it works
+## 工作原理
 
-1. **Interception** — the plugin hooks `command.execute.before` and intercepts `/polish` commands
-2. **Context gathering** — reads recent messages from the current session (max 6 messages, 500 chars each)
-3. **Optimization** — sends a system prompt + context + original prompt to the LLM through a dedicated hidden subagent with zero tool access
-4. **Result delivery** — the optimized prompt replaces the input box content
+1. `command.execute.before` hook 拦截 `/polish` 命令
+2. 读取当前会话最近的 N 条消息作为上下文
+3. 在隐藏的 `polish` 子 agent 中调用 LLM 优化（agent 工具集为空）
+4. 把优化结果写回输入框（`/polish`）或直接发送（`/polish-send`）
 
-The hidden `polish` agent is registered with `tools: {}` and all permissions set to `"deny"`, ensuring it can only generate text — never execute code or use tools.
-
-## Architecture
-
-```
-User types /polish <prompt>
-         │
-         ▼
-command.execute.before hook
-         │
-         ├─► throw __POLISH_HANDLED__  (block default execution)
-         │
-         └─► Async flow:
-              ├─ clearPrompt()
-              ├─ fetch session context
-              ├─ create child session (hidden polish agent)
-              ├─ session.prompt({ agent: "polish", ... })
-              ├─ read assistant response
-               └─ appendPrompt(result)
-```
-
-## Development
+## 开发
 
 ```powershell
-npm run build     # build with tsup
-npm run typecheck # type check with tsc
+npm run build       # tsup 打包
+npm run typecheck   # tsc 类型检查
 ```
+
+发版流程（推送 tag 自动发布到 npm）：
+
+```powershell
+npm version patch   # 0.1.0 → 0.1.1
+git push
+git push --tags     # 触发 GitHub Actions
+```
+
+GitHub Actions 配置在 `.github/workflows/publish.yml`。仓库需要配置 `NPM_TOKEN` secret。
 
 ## License
 
