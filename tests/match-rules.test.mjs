@@ -4,6 +4,10 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 
+// Minimal mock for file ops (not actually used by the inlined functions)
+void readFileSync
+void join
+
 // Inline a copy of matchRules + types for testing without bundler
 const DEFAULT_CONFIG = {
   model: "",
@@ -34,6 +38,21 @@ function matchRules(prompt, config) {
     }
   }
   return matched
+}
+
+// Inline copy of looksLikeAnswer
+function looksLikeAnswer(text) {
+  const t = text.trim()
+  if (!t) return true
+  const answerPrefixRe =
+    /^(here('s| is)?\b|below\b|sure\b|of course\b|absolutely\b|certainly\b|i('ll| will| can)\b|let me\b|好的[，,。 ]?|当然[可以，,。 ]?|下面是|以下是|让我|我来|可以的|没问[题到]|当然可[以到])/i
+  if (answerPrefixRe.test(t)) return true
+  if (/```/.test(t)) return true
+  const helpfulEnRe =
+    /\b(i can help|i can assist|let me know|feel free to|here to help)\b/i
+  const helpfulZhRe = /希望对[你您]有帮助|希望能帮[到助]/
+  if (helpfulEnRe.test(t) || helpfulZhRe.test(t)) return true
+  return false
 }
 
 const cfg = {
@@ -117,6 +136,39 @@ for (const t of tests) {
     console.log(`FAIL  ${t.name}`)
     console.log(`      expected: ${JSON.stringify(t.expected)}`)
     console.log(`      got:      ${JSON.stringify(got)}`)
+    fail++
+  }
+}
+
+console.log()
+console.log("--- looksLikeAnswer ---")
+const answerTests = [
+  // Should be detected as answer
+  { name: "empty output", text: "", expect: true },
+  { name: "English 'Here is' prefix", text: "Here is a TypeScript function:\n...", expect: true },
+  { name: "English 'Below' prefix", text: "Below is the implementation:\n...", expect: true },
+  { name: "English 'Sure' prefix", text: "Sure, I can help with that.", expect: true },
+  { name: "English 'I'll' prefix", text: "I'll write the function for you.", expect: true },
+  { name: "Chinese '好的' prefix", text: "好的，这是一个登录函数：\n...", expect: true },
+  { name: "Chinese '当然' prefix", text: "当然可以，下面是实现代码", expect: true },
+  { name: "Chinese '下面是' prefix", text: "下面是优化后的版本：...", expect: true },
+  { name: "code fence", text: "Rewritten prompt:\n```typescript\nfunction foo() {}\n```", expect: true },
+  { name: "I can help phrase", text: "I can help you with this task.", expect: true },
+  { name: "希望对你有帮助", text: "希望对你有帮助！", expect: true },
+  // Should NOT be detected as answer
+  { name: "plain rewrite", text: "Write a TypeScript login function with email/password validation, JWT-based session handling, and bcrypt password hashing.", expect: false },
+  { name: "rewrite starting with action verb", text: "Implement a binary search function in TypeScript that returns the index of the target, or -1 if not found.", expect: false },
+  { name: "short rewrite", text: "Fix the login bug", expect: false },
+  { name: "rewrite with code in text (not fence)", text: "Review the function foo() in src/auth.ts and explain the vulnerability.", expect: false },
+]
+for (const t of answerTests) {
+  const got = looksLikeAnswer(t.text)
+  const ok = got === t.expect
+  if (ok) {
+    console.log(`PASS  ${t.name}`)
+    pass++
+  } else {
+    console.log(`FAIL  ${t.name}: expected ${t.expect}, got ${got}`)
     fail++
   }
 }

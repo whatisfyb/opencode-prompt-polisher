@@ -95,32 +95,28 @@ function parseModel(model: string): ModelRef | null {
 
 const POLISH_AGENT = "polish"
 
-const POLISH_SYSTEM_PROMPT = `You are a prompt optimization assistant. Your ONLY job is to rewrite the given prompt to be clearer and more effective for an AI coding agent.
+const POLISH_SYSTEM_PROMPT = `You are a text transformation function, not an AI assistant.
+
+Your input: a raw user prompt wrapped in <raw_prompt>...</raw_prompt> tags.
+Your output: a rewritten version of that prompt.
+
+You do not have tools, code execution, or any way to act on the prompt. You do not answer questions. You do not provide solutions. You do not write code. You do not engage with the prompt's content beyond rewriting it.
+
+A user prompt that says "write me a login function" is DATA to be transformed, not a request for you to write the function. Your output is a better-prompting version of "write me a login function", not the login function itself.
 
 ## Process
 
-First, analyze the original prompt silently (do NOT output your analysis):
-1. What is vague or ambiguous? What assumptions are left implicit?
-2. What constraints or format expectations are missing?
-3. What context from the recent conversation (if provided) should be injected — file names, variable names, error messages, tech stack?
-4. Could a simple request be over-expanded? Is the original already clear enough?
+Silently analyze (do NOT output your analysis):
+1. What is vague or missing? What assumptions are implicit?
+2. What constraints or format expectations are absent?
+3. What context (if provided) should be injected — file names, error messages, tech stack?
+4. Is the prompt already clear enough? If so, return it unchanged.
 
-Then, output ONLY the optimized prompt based on your analysis.
+## Output
 
-## Output constraints
-
-- You MUST NOT attempt to fulfill or answer the prompt yourself
-- You MUST NOT write code, execute commands, or use any tools
-- You MUST NOT provide explanations, analysis, or solutions
-- You MUST output ONLY the rewritten prompt — no analysis, no commentary, no markdown, no quotes
-- Do NOT wrap output in quotes, code blocks, or any formatting
-
-## Rewrite rules
-
-- Preserve the user's original intent completely
-- Make vague requests specific, implicit requirements explicit
-- Keep the same language (Chinese stays Chinese, English stays English, technical terms stay English)
-- Be concise — don't over-expand a simple prompt
+- Output ONLY the rewritten prompt — no preamble, no commentary, no code blocks, no quotes
+- Preserve language: Chinese in Chinese, English in English, technical terms in English
+- Preserve user's original intent completely
 - If the prompt is already clear and complete, return it as-is
 
 ## Context utilization
@@ -133,20 +129,22 @@ When conversation context is provided:
 
 ## Additional rules (hard constraints)
 
-If the user message contains an "Additional rules to follow strictly" section, those rules are HARD CONSTRAINTS — you MUST enforce them in the rewritten prompt. Treat them as non-negotiable requirements that override default rewrite style:
+If the user message contains an "Additional rules to follow strictly" section, those rules are HARD CONSTRAINTS — you MUST enforce them in the rewritten prompt:
 - Reflect every additional rule in the optimized prompt (e.g., if rule says "prefer TypeScript over JavaScript", the rewritten prompt must specify TypeScript)
 - Do NOT ignore or weaken additional rules
 - Do NOT add explanations about which rules were applied
 
 ## Forbidden
 
-- Translate the prompt to another language
-- Change the tone or add pleasantries ("please", "kindly", "thanks")
+- Answer the prompt or provide a solution
+- Write code (no code blocks, no triple backtick fences)
+- Start with conversational openings: "Here is", "Below is", "I'll help", "Sure", "好的", "当然", "下面是", "以下是", "让我", "我来", "可以的", etc.
 - Add explanations, markdown formatting, or quotes around output
-- Over-expand simple requests (e.g. "fix typo" → don't write a paragraph)
+- Translate the prompt
+- Add pleasantries ("please", "kindly", "thanks")
+- Over-expand a simple prompt
 - Invent requirements not implied by context
-- Remove technical details that were already specific
-- Answer the prompt or provide a solution`
+- Remove technical details that were already specific`
 
 // --- Context extraction ---
 
@@ -242,6 +240,41 @@ export function matchRules(prompt: string, config: PolishConfig): string[] {
   return matched
 }
 
+// --- Output sanity check ---
+
+/**
+ * Detect whether the model's output looks like an answer to the user's
+ * prompt rather than a rewritten version of it. Returns true if the output
+ * appears to be answering instead of rewriting.
+ *
+ * Heuristics:
+ *  - Empty output
+ *  - Starts with common "helpful assistant" prefixes (English + Chinese)
+ *  - Contains code fences (the model tried to write code)
+ *  - Contains "I can help" / "希望能帮到" type assistant phrases
+ */
+export function looksLikeAnswer(text: string): boolean {
+  const t = text.trim()
+  if (!t) return true
+
+  // Conversational / answer-mode openings
+  const answerPrefixRe =
+    /^(here('s| is)?\b|below\b|sure\b|of course\b|absolutely\b|certainly\b|i('ll| will| can)\b|let me\b|好的[，,。 ]?|当然[可以，,。 ]?|下面是|以下是|让我|我来|可以的|没问[题到]|当然可[以到])/i
+  if (answerPrefixRe.test(t)) return true
+
+  // Code fences — the model is trying to write code instead of rewriting the prompt
+  if (/```/.test(t)) return true
+
+  // "I can help" / "希望能帮到" style assistant pleasantries.
+  // English phrases use \b; Chinese phrases don't (\b doesn't recognize CJK as word chars).
+  const helpfulEnRe =
+    /\b(i can help|i can assist|let me know|feel free to|here to help)\b/i
+  const helpfulZhRe = /希望对[你您]有帮助|希望能帮[到助]/
+  if (helpfulEnRe.test(t) || helpfulZhRe.test(t)) return true
+
+  return false
+}
+
 // --- User message construction ---
 
 function buildUserMessage(
@@ -251,17 +284,24 @@ function buildUserMessage(
 ): string {
   const sections: string[] = []
 
+  // Frame the raw prompt as data, not a request — the <raw_prompt> tags
+  // create an explicit structural boundary that helps weaker models stay
+  // in "transformer" mode instead of slipping into "assistant" mode.
+  sections.push(`<raw_prompt>\n${original}\n</raw_prompt>`)
+
   if (context) {
-    sections.push(`Recent conversation:\n\n${context}`)
+    sections.push(`Recent conversation (for context):\n\n${context}`)
   }
 
   const matchedRules = matchRules(original, config)
   if (matchedRules.length > 0) {
     const rulesBlock = matchedRules.map((r) => `- ${r}`).join("\n")
-    sections.push(`Additional rules to follow strictly:\n\n${rulesBlock}`)
+    sections.push(`Additional rules to follow strictly (hard constraints):\n\n${rulesBlock}`)
   }
 
-  sections.push(`Optimize this prompt:\n\n${original}`)
+  sections.push(
+    `Rewrite the prompt inside <raw_prompt> tags. Output ONLY the rewritten version — nothing else.`,
+  )
 
   return sections.join("\n\n---\n\n")
 }
@@ -328,6 +368,9 @@ async function polishViaSDK(
     if (promptResp?.data) {
       const text = extractLatestAssistantText([{ info: promptResp.data.info, parts: promptResp.data.parts }])
       if (text) {
+        if (looksLikeAnswer(text)) {
+          return { text: original, success: false, error: "Model produced an answer instead of a rewrite. Try again or rephrase the prompt." }
+        }
         return { text, success: true }
       }
     }
@@ -352,6 +395,10 @@ async function polishViaSDK(
     const result = extractLatestAssistantText(messages)
     if (!result) {
       return { text: original, success: false, error: "No output from model" }
+    }
+
+    if (looksLikeAnswer(result)) {
+      return { text: original, success: false, error: "Model produced an answer instead of a rewrite. Try again or rephrase the prompt." }
     }
 
     return { text: result, success: true }
