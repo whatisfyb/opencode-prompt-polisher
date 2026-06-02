@@ -116,8 +116,8 @@ npm run build
     ],
     "patterns": [
       {
-        "match": ["code", "function", "实现", "写一个", "implement", "build", "refactor"],
-        "rule": "代码类 prompt：优先 TypeScript、提前返回、避免不必要的 try/catch、明确函数签名"
+        "match": ["code", "function", "实现", "写一个", "implement", "build", "refactor", "test", "tests", "spec", "测试", "单元测试", "覆盖"],
+        "rule": "代码/测试类 prompt：优先 TypeScript、提前返回、避免不必要的 try/catch、明确函数签名；测试要注明框架（jest/vitest/pytest 等），覆盖正常/边界/异常路径"
       },
       {
         "match": ["sql", "database", "query", "数据库", "查询"],
@@ -148,7 +148,7 @@ npm run build
 
 | 用户 prompt 包含 | 命中的硬约束 |
 |---|---|
-| `code` / `function` / `写一个` | 优先 TypeScript、提前返回… |
+| `code` / `function` / `写一个` / `test` / `测试` | 优先 TypeScript、提前返回、注明测试框架… |
 | `sql` / `数据库` / `query` | 用 CTE 优先、参数化输入… |
 | `doc` / `README` / `文档` | Markdown 标题层级、配代码示例… |
 | 无任何匹配 | 仅 `default` 规则 |
