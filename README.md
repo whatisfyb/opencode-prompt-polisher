@@ -10,7 +10,7 @@ OpenCode 插件：基于对话上下文自动优化你的提示词。
 帮我写个搜索表格
 ```
 
-**输出**（优化后填入输入框）：
+**输出**（优化后返回到会话）：
 
 ```
 基于现有项目（React + TypeScript），写一个支持服务端搜索的通用表格组件。需求：
@@ -34,11 +34,11 @@ OpenCode 插件：基于对话上下文自动优化你的提示词。
 
 ### npm（推荐）
 
-编辑 `~/.config/opencode/opencode.json`：
+编辑 `~/.config/opencode/opencode.json`（OpenCode **V2** 配置键为 `plugins`）：
 
 ```jsonc
 {
-  "plugin": [
+  "plugins": [
     "opencode-prompt-polisher"
   ]
 }
@@ -50,7 +50,7 @@ OpenCode 插件：基于对话上下文自动优化你的提示词。
 
 ```jsonc
 {
-  "plugin": [
+  "plugins": [
     "C:\\path\\to\\opencode-prompt-polisher"
   ]
 }
@@ -68,8 +68,14 @@ npm run build
 
 | 命令 | 行为 |
 |---|---|
-| `/polish <prompt>` | 优化后填入输入框，等你编辑或发送 |
-| `/polish-send <prompt>` | 优化后自动发送 |
+| `/polish <prompt>` | 优化后以 fenced 代码块形式作为会话内 prompt 消息返回（"Copy to use:" 框架），等你复制后手动发送 |
+| `/polish-send <prompt>` | 优化后自动提交到当前会话 |
+
+> **V2 行为变更**：OpenCode V2 的核心插件 API 没有 TUI 输入框接口（V1 的
+> `ctx.client.tui.appendPrompt/submitPrompt` 已移除），所以 `/polish` 不再把
+> 结果填入输入框，而是把优化结果直接写回当前会话方便复制发送（V2.0 曾用
+> synthetic 消息，但该通道在 UI 中不可见，已改回 prompt）；`/polish-send`
+> 则直接提交。失败提示（包括模型拒绝改写）同样以可见消息返回，原文保留。
 
 ### 示例
 
@@ -77,13 +83,13 @@ npm run build
 /polish 这个函数性能有问题
 ```
 
-→ 输入框出现优化后的提示词，弹出 "Polish Ready" 提示。你可以直接发送，也可以先编辑。
+→ 当前会话出现一条内含优化后提示词（fenced 代码块）的消息，复制即可发送。
 
 ```
 /polish-send 写一个二分查找
 ```
 
-→ 优化后直接发送，无需再操作。
+→ 优化后直接提交到当前会话，无需再操作。
 
 ## 配置
 
@@ -91,8 +97,9 @@ npm run build
 
 ```jsonc
 {
-  // 模型，格式 "provider/model-id"
-  // 通过 OpenCode 内部路由调用，无需单独配置 apiKey
+  // 模型，格式 "provider/model-id"，任何已配置的 provider 都可用
+  // （含本地模型，例如 "llama-server/small-model" —— 只要该 provider 在
+  //  opencode.jsonc 里配置好了）
   "model": "opencode/deepseek-v4-flash-free",
 
   // 上下文提取设置
@@ -136,11 +143,19 @@ npm run build
 
 ## 工作原理
 
-1. `command.execute.before` hook 拦截 `/polish` 命令
-2. 读取当前会话最近的 N 条消息作为上下文
+1. V2 插件在启动时通过 `ctx.command.transform` 注册 `/polish`、`/polish-send`
+   命令（V1 的 `command.execute.before` hook 在 V2 已移除）
+2. 读取当前会话最近的 N 条消息作为上下文（`ctx.session.context`）
 3. 按关键词匹配 `rules.patterns`，把命中的规则作为硬约束注入到 user message
-4. 在隐藏的 `polish` 子 agent 中调用 LLM 优化（agent 工具集为空）
-5. 把优化结果写回输入框（`/polish`）或直接发送（`/polish-send`）
+4. 创建一个隐藏的 `polish` 子 agent 会话（`ctx.session.create`，model 为配置中的
+   `provider/model-id`，permissions 全部 deny），在其中调用 LLM 优化
+5. 把优化结果写回当前会话（`/polish` 为 fenced 代码块的 prompt 消息，`/polish-send` 直接提交）；失败时返回可见的失败提示并保留原文
+
+> **polish agent 注册**：V2 的 `AgentEditor` 没有 `add()`，插件只通过
+> `editor.update("polish", …)` 增强已存在的 agent。如果当前配置里没有定义
+> `polish` agent，插件不会凭空创建；请在 `opencode.json(c)` 里加一行
+> `"agent": { "polish": { "prompt": "..." } }`（或在 polish.jsonc 同级配置中定义），
+> 插件随后会补上 system prompt、subagent 模式、隐藏、steps=1 和 deny 权限。
 
 ### 规则匹配机制
 
@@ -160,8 +175,16 @@ LLM 把命中的规则视为不可违反的硬约束 —— 优化结果里必�
 ```powershell
 npm run build              # tsup 打包
 npm run typecheck          # tsc 类型检查
-node tests/match-rules.test.mjs   # 跑 rules 匹配测试（8 个用例）
+npm test                   # tsup + node tests/match-rules.test.mjs（119 个用例）
 ```
+
+### 输出守卫与上下文过滤（V2 port）
+
+改写结果在交付前经过守卫链（`finishRewrite`），任一命中即回退原文并给出可见失败提示：
+
+- 应答/寒暄、session 协议泄漏、复读循环、复述式改写（换个说法复述指令而非改写）、模型拒绝改写
+- 上下文只取用户消息：assistant 回复、system/synthetic 消息整体丢弃；`/todo` 报告、`Copy to use:` 框架、裸 `/polish` 调用文本同样不进入上下文（均实测漏入过改写结果）
+- 交付框架为单行 `Copy to use:` + fenced 代码块；清理器只剥离行首框架，提及该短语的用户原文不受影响
 
 发版流程（推送 tag 自动发布到 npm）：
 

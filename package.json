@@ -1,6 +1,6 @@
 {
   "name": "opencode-prompt-polisher",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,12 +15,12 @@
     "README.md"
   ],
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.14.0"
+    "@opencode/plugin": ">=2.0.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.15.12",
-    "typescript": "^5.7.0",
-    "tsup": "^8.0.0"
+    "@opencode/plugin": "^2.0.22",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
   },
   "scripts": {
     "build": "tsup",
